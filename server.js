@@ -1,28 +1,26 @@
 // server.js
 const express = require('express');
 const bodyParser = require('body-parser');
-const mysql = require('mysql2');
 const cors = require('cors');
 const natural = require('natural');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const mysql = require('mysql2/promise');
 
 // Database Connection
-const db = mysql.createConnection({
+const db = mysql.createPool({
   host: 'localhost',
   user: 'root',
   password: '',
   database: 'djournal_db',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-db.connect((err) => {
-  if (err) {
-    console.error('Database connection failed:', err);
-    process.exit(1);
-  }
-  console.log('Connected to MySQL database');
-});
+module.exports = db;
+
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -33,13 +31,15 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
+    // Add timestamp to prevent filename collisions
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
   },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif/;
     const isValidType = allowedTypes.test(file.mimetype);
@@ -48,7 +48,7 @@ const upload = multer({
     if (isValidType && isValidExt) {
       return cb(null, true);
     }
-    cb(new Error('Only image files are allowed'));
+    cb(new Error('Only image files (jpeg, jpg, png, gif) are allowed'));
   },
 });
 
@@ -80,12 +80,7 @@ function analyzeSentiment(text) {
   sentences.forEach((sentence) => {
     const tokens = tokenizer.tokenize(sentence);
     const score = Math.floor(analyzer.getSentiment(tokens) * 10) / 10;
-
-    // let positiveScore = Math.max(0, score);
-    // let negativeScore = Math.abs(Math.min(0, score));
-    // let neutralScore = 1 - positiveScore - negativeScore;
     
-
     if(score == 0)
       neutralTotal += 1
     else if(score > 0)
@@ -158,7 +153,97 @@ function analyzeSentiment(text) {
   };
 }
 
+// Function to Extract Keywords
+function extractKeywords(text) {
+  const tokenizer = new natural.WordTokenizer();
+  const stopwords = new Set(natural.stopwords);
+  const words = tokenizer.tokenize(text.toLowerCase());
+
+  const keywords = words.filter(word => !stopwords.has(word) && word.length > 2);
+
+  console.log(`Extracted Keywords: ${keywords}`);
+  return keywords;
+}
+
+// Function to Recommend Tourist Spots
+async function recommendSpots() {
+  try {
+    // Get journal entries with descriptions
+    const [entries] = await db.query('SELECT entry_description FROM entries');
+    
+    let recommendations = [];
+
+    for (const entry of entries) {
+      const { entry_description } = entry;
+
+      console.log(`Processing Entry: "${entry_description}"`);
+
+      // Analyze Sentiment
+      const sentimentResult = await analyzeSentiment(entry_description);
+
+      // Only recommend if sentiment is positive
+      if (sentimentResult.sentiment !== 'positive') {
+        console.log('Skipping entry due to non-positive sentiment.');
+        continue;
+      }
+
+      // Extract Keywords from Journal Entry
+      const entryKeywords = extractKeywords(entry_description);
+
+      // Get Locations from Database
+      const [locations] = await db.query('SELECT location_place, location_name, location_description FROM locations');
+
+      // Match Locations based on Keywords
+      locations.forEach(location => {
+        const locationKeywords = extractKeywords(location.location_description);
+        const matchScore = entryKeywords.filter(word => locationKeywords.includes(word)).length;
+
+        if (matchScore > 0) {
+          console.log(`Match Found! Location: ${location.location_name}, Score: ${matchScore}`);
+
+          recommendations.push({
+            location_name: location.location_name,
+            location_place: location.location_place,
+            match_score: matchScore,
+            sentiment: sentimentResult.sentiment,
+            positive_percentage: sentimentResult.positive_percentage
+          });
+        }
+      });
+    }
+
+    // Sort by match score (higher score = better match)
+    recommendations.sort((a, b) => b.match_score - a.match_score);
+
+    console.log('Final Recommendations:', recommendations);
+
+    return recommendations;
+  } catch (error) {
+    console.error('Error:', error);
+    return [];
+  }
+}
+
+// Run Recommendation Function
+recommendSpots().then(recommendations => {
+  console.log('Recommended Places:', recommendations);
+});
+
 // API Endpoints
+
+// Fetch recommendations
+app.get('/api/recommendations', async (req, res) => {
+  try {
+    const recommendations = await recommendSpots();
+    res.status(200).json(recommendations);
+  } catch (error) {
+    console.error('Error fetching recommendations:', error);
+    res.status(500).json({ 
+      message: 'Error fetching recommendations', 
+      error: error.message 
+    });
+  }
+});
 
 // Create a new journal
 app.post('/api/journals', (req, res) => {
@@ -191,49 +276,69 @@ app.get('/api/journals', (req, res) => {
 });
 
 // Create a new entry
-app.post('/api/entries', upload.single('entry_image'), (req, res) => {
-  const { journal_id, entry_description, entry_datetime, entry_location, entry_location_name } = req.body;
+app.post('/api/entries', upload.array('entry_images', 5), async (req, res) => {
+  try {
+    const { journal_id, entry_description, entry_datetime, entry_location, entry_location_name } = req.body;
 
-  if (!journal_id || !entry_description || !entry_datetime) {
-    if (req.file) {
-      fs.unlinkSync(req.file.path);
-    }
-    return res.status(400).json({ message: 'Journal ID, description, and datetime are required' });
-  }
-
-  const { sentiment, positive_percentage, negative_percentage, neutral_percentage } = analyzeSentiment(entry_description);
-  const entry_image = req.file ? `/uploads/${req.file.filename}` : null;
-
-  const query = `INSERT INTO entries 
-               (journal_id, entry_description, entry_datetime, sentiment, 
-                entry_location, entry_location_name, entry_image, 
-                positive_percentage, negative_percentage, neutral_percentage) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-
-  db.query(query, [
-    journal_id, entry_description, entry_datetime, sentiment, 
-    entry_location, entry_location_name, entry_image, 
-    positive_percentage, negative_percentage, neutral_percentage
-  ], (err, result) => {
-    if (err) {
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
+    if (!journal_id || !entry_description || !entry_datetime) {
+      // Clean up uploaded files if validation fails
+      if (req.files) {
+        req.files.forEach(file => fs.unlinkSync(file.path));
       }
-      console.error('Error creating entry:', err);
-      return res.status(500).json({ message: 'Error creating entry', error: err });
+      return res.status(400).json({ message: 'Journal ID, description, and datetime are required' });
     }
-    res.status(201).json({
-      message: 'Entry created successfully',
-      entry_id: result.insertId,
-      sentiment,
-      positive_percentage,
-      negative_percentage,
-      neutral_percentage,
-      imageUrl: entry_image,
-    });
-  });
-});
 
+    const { sentiment, positive_percentage, negative_percentage, neutral_percentage } = analyzeSentiment(entry_description);
+    
+    // Handle multiple images
+    const entry_images = req.files ? req.files.map(file => `/uploads/${file.filename}`) : [];
+
+    const query = `INSERT INTO entries 
+                 (journal_id, entry_description, entry_datetime, sentiment, 
+                  entry_location, entry_location_name, entry_images, 
+                  positive_percentage, negative_percentage, neutral_percentage) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+    db.query(query, [
+      journal_id, 
+      entry_description, 
+      entry_datetime, 
+      sentiment, 
+      entry_location, 
+      entry_location_name, 
+      JSON.stringify(entry_images),
+      positive_percentage, 
+      negative_percentage, 
+      neutral_percentage
+    ], (err, result) => {
+      if (err) {
+        // Clean up uploaded files if database insert fails
+        if (req.files) {
+          req.files.forEach(file => fs.unlinkSync(file.path));
+        }
+        console.error('Error creating entry:', err);
+        return res.status(500).json({ message: 'Error creating entry', error: err });
+      }
+
+      res.status(201).json({
+        message: 'Entry created successfully',
+        entry_id: result.insertId,
+        sentiment,
+        positive_percentage,
+        negative_percentage,
+        neutral_percentage,
+        entry_images,
+      });
+    });
+  } catch (error) {
+    // Clean up uploaded files if any error occurs
+    if (req.files) {
+      req.files.forEach(file => fs.unlinkSync(file.path));
+    }
+    console.error('Error processing request:', error);
+    res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
 
 // Fetch entries for a specific journal
 app.get('/api/entries/:journalId', (req, res) => {
@@ -279,73 +384,81 @@ app.delete('/api/journals/:journalId', (req, res) => {
 });
 
 // Update an entry
-app.put('/api/entries/:entryId', upload.single('entry_image'), (req, res) => {
-  const { entryId } = req.params;
-  const { entry_description, entry_datetime, entry_location, entry_location_name, existing_image, clear_image } = req.body;
+app.put('/api/entries/:entryId', upload.array('entry_images', 5), async (req, res) => {
+  try {
+    const { entryId } = req.params;
+    const { journal_id, entry_description, entry_datetime, entry_location, entry_location_name, existing_images } = req.body;
 
-  const { sentiment, positive_percentage, negative_percentage, neutral_percentage } = analyzeSentiment(entry_description);
+    if (!journal_id || !entry_description || !entry_datetime) {
+      if (req.files) {
+        req.files.forEach(file => fs.unlinkSync(file.path));
+      }
+      return res.status(400).json({ message: 'Journal ID, description, and datetime are required' });
+    }
 
-  let entry_image = existing_image;
-  
-  if (clear_image === 'true') {
-    entry_image = null;
+    const { sentiment, positive_percentage, negative_percentage, neutral_percentage } = analyzeSentiment(entry_description);
     
-    if (existing_image) {
-      const oldImagePath = path.join(__dirname, existing_image);
-      if (fs.existsSync(oldImagePath)) {
-        fs.unlinkSync(oldImagePath); 
-      }
+    // Combine existing and new images
+    let entry_images = [];
+    if (existing_images) {
+      entry_images = JSON.parse(existing_images);
     }
-  }
-
-  if (req.file) {
-    entry_image = `/uploads/${req.file.filename}`;
-    
-    if (existing_image && existing_image !== entry_image) {
-      const oldImagePath = path.join(__dirname, existing_image);
-      if (fs.existsSync(oldImagePath)) {
-        fs.unlinkSync(oldImagePath);
-      }
-    }
-  }
-
-  const query = `UPDATE entries 
-                 SET entry_description = ?, entry_datetime = ?, sentiment = ?, 
-                     positive_percentage = ?, negative_percentage = ?, neutral_percentage = ?, 
-                     entry_location = ?, entry_location_name = ?, entry_image = ? 
-                 WHERE entry_id = ?`;
-
-  db.query(query, [
-    entry_description, 
-    entry_datetime, 
-    sentiment, 
-    positive_percentage, 
-    negative_percentage, 
-    neutral_percentage, 
-    entry_location, 
-    entry_location_name, 
-    entry_image, 
-    entryId
-  ], (err, results) => {
-    if (err) {
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
-      console.error('Error updating entry:', err);
-      return res.status(500).json({ message: 'Error updating entry', error: err });
+    if (req.files) {
+      const newImages = req.files.map(file => `/uploads/${file.filename}`);
+      entry_images = [...entry_images, ...newImages];
     }
 
-    res.status(200).json({
-      message: 'Entry updated successfully',
+    const query = `UPDATE entries SET 
+                   journal_id = ?, 
+                   entry_description = ?, 
+                   entry_datetime = ?, 
+                   sentiment = ?,
+                   entry_location = ?, 
+                   entry_location_name = ?, 
+                   entry_images = ?,
+                   positive_percentage = ?,
+                   negative_percentage = ?,
+                   neutral_percentage = ?
+                   WHERE entry_id = ?`;
+
+    db.query(query, [
+      journal_id,
+      entry_description,
+      entry_datetime,
       sentiment,
+      entry_location,
+      entry_location_name,
+      JSON.stringify(entry_images),
       positive_percentage,
       negative_percentage,
       neutral_percentage,
-      imageUrl: entry_image
-    });
-  });
-});
+      entryId
+    ], (err, result) => {
+      if (err) {
+        if (req.files) {
+          req.files.forEach(file => fs.unlinkSync(file.path));
+        }
+        console.error('Error updating entry:', err);
+        return res.status(500).json({ message: 'Error updating entry', error: err });
+      }
 
+      res.status(200).json({
+        message: 'Entry updated successfully',
+        sentiment,
+        positive_percentage,
+        negative_percentage,
+        neutral_percentage,
+        entry_images,
+      });
+    });
+  } catch (error) {
+    if (req.files) {
+      req.files.forEach(file => fs.unlinkSync(file.path));
+    }
+    console.error('Error processing request:', error);
+    res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
 
 // Delete an entry
 app.delete('/api/entries/:entryId', (req, res) => {
