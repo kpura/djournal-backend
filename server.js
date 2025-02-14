@@ -4,12 +4,15 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const natural = require('natural');
 const multer = require('multer');
+const fs = require('fs').promises;
 const path = require('path');
-const fs = require('fs');
 const mysql = require('mysql2/promise');
 
+const app = express();
+const PORT = 3000;
+
 // Database Connection
-const db = mysql.createPool({
+const pool = mysql.createPool({
   host: 'localhost',
   user: 'root',
   password: '',
@@ -18,9 +21,6 @@ const db = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0
 });
-
-module.exports = db;
-
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -31,7 +31,6 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    // Add timestamp to prevent filename collisions
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     cb(null, uniqueSuffix + path.extname(file.originalname));
   },
@@ -51,10 +50,6 @@ const upload = multer({
     cb(new Error('Only image files (jpeg, jpg, png, gif) are allowed'));
   },
 });
-
-// Initialize Express app
-const app = express();
-const PORT = 3000;
 
 // Middleware
 app.use(cors());
@@ -169,7 +164,7 @@ function extractKeywords(text) {
 async function recommendSpots() {
   try {
     // Get journal entries with descriptions
-    const [entries] = await db.query('SELECT entry_description FROM entries');
+    const [entries] =  await pool.execute('SELECT entry_description FROM entries');
     
     let recommendations = [];
 
@@ -190,8 +185,7 @@ async function recommendSpots() {
       // Extract Keywords from Journal Entry
       const entryKeywords = extractKeywords(entry_description);
 
-      // Get Locations from Database
-      const [locations] = await db.query('SELECT location_place, location_name, location_description FROM locations');
+      const [locations] =  await pool.execute('SELECT location_place, location_name, location_description FROM locations');
 
       // Match Locations based on Keywords
       locations.forEach(location => {
@@ -224,7 +218,6 @@ async function recommendSpots() {
   }
 }
 
-// Run Recommendation Function
 recommendSpots().then(recommendations => {
   console.log('Recommended Places:', recommendations);
 });
@@ -246,235 +239,264 @@ app.get('/api/recommendations', async (req, res) => {
 });
 
 // Create a new journal
-app.post('/api/journals', (req, res) => {
-  const { journal_title, journal_date } = req.body;
+app.post('/api/journals', async (req, res) => {
+  try {
+    const { journal_title, journal_date } = req.body;
 
-  if (!journal_title || !journal_date) {
-    return res.status(400).json({ message: 'Journal title and date are required' });
-  }
-
-  const query = 'INSERT INTO journals (journal_title, journal_date) VALUES (?, ?)';
-  db.query(query, [journal_title, journal_date], (err, results) => {
-    if (err) {
-      console.error('Error creating journal:', err);
-      return res.status(500).json({ message: 'Error creating journal', error: err });
+    if (!journal_title || !journal_date) {
+      return res.status(400).json({ message: 'Journal title and date are required' });
     }
-    res.status(201).json({ message: 'Journal created successfully', journal_id: results.insertId });
-  });
+
+    const [result] = await pool.execute(
+      'INSERT INTO journals (journal_title, journal_date) VALUES (?, ?)',
+      [journal_title, journal_date]
+    );
+
+    res.status(201).json({
+      message: 'Journal created successfully',
+      journal_id: result.insertId
+    });
+  } catch (error) {
+    console.error('Error creating journal:', error);
+    res.status(500).json({ message: 'Error creating journal', error: error.message });
+  }
 });
 
 // Fetch all journals
-app.get('/api/journals', (req, res) => {
-  const query = 'SELECT * FROM journals';
-  db.query(query, (err, results) => {
-    if (err) {
-      console.error('Error fetching journals:', err);
-      return res.status(500).json({ message: 'Error fetching journals', error: err });
-    }
-    res.status(200).json(results);
-  });
-});
-
-// Create a new entry
-app.post('/api/entries', upload.array('entry_images', 5), async (req, res) => {
+app.get('/api/journals', async (req, res) => {
   try {
-    const { journal_id, entry_description, entry_datetime, entry_location, entry_location_name } = req.body;
-
-    if (!journal_id || !entry_description || !entry_datetime) {
-      // Clean up uploaded files if validation fails
-      if (req.files) {
-        req.files.forEach(file => fs.unlinkSync(file.path));
-      }
-      return res.status(400).json({ message: 'Journal ID, description, and datetime are required' });
-    }
-
-    const { sentiment, positive_percentage, negative_percentage, neutral_percentage } = analyzeSentiment(entry_description);
-    
-    // Handle multiple images
-    const entry_images = req.files ? req.files.map(file => `/uploads/${file.filename}`) : [];
-
-    const query = `INSERT INTO entries 
-                 (journal_id, entry_description, entry_datetime, sentiment, 
-                  entry_location, entry_location_name, entry_images, 
-                  positive_percentage, negative_percentage, neutral_percentage) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-
-    db.query(query, [
-      journal_id, 
-      entry_description, 
-      entry_datetime, 
-      sentiment, 
-      entry_location, 
-      entry_location_name, 
-      JSON.stringify(entry_images),
-      positive_percentage, 
-      negative_percentage, 
-      neutral_percentage
-    ], (err, result) => {
-      if (err) {
-        // Clean up uploaded files if database insert fails
-        if (req.files) {
-          req.files.forEach(file => fs.unlinkSync(file.path));
-        }
-        console.error('Error creating entry:', err);
-        return res.status(500).json({ message: 'Error creating entry', error: err });
-      }
-
-      res.status(201).json({
-        message: 'Entry created successfully',
-        entry_id: result.insertId,
-        sentiment,
-        positive_percentage,
-        negative_percentage,
-        neutral_percentage,
-        entry_images,
-      });
-    });
+    const [rows] = await pool.query('SELECT * FROM journals');
+    res.json(rows);
   } catch (error) {
-    // Clean up uploaded files if any error occurs
-    if (req.files) {
-      req.files.forEach(file => fs.unlinkSync(file.path));
-    }
-    console.error('Error processing request:', error);
-    res.status(500).json({ message: 'Internal server error', error: error.message });
+    console.error('Error fetching journals:', error);
+    res.status(500).json({ message: 'Error fetching journals', error: error.message });
   }
 });
 
-// Fetch entries for a specific journal
-app.get('/api/entries/:journalId', (req, res) => {
-  const journalId = req.params.journalId;
-  const query = 'SELECT * FROM entries WHERE journal_id = ?';
-
-  db.query(query, [journalId], (err, results) => {
-    if (err) {
-      console.error('Error fetching entries:', err);
-      return res.status(500).json({ message: 'Error fetching entries', error: err });
-    }
-    res.status(200).json(results);
-  });
-});
-
-// Update a journal
-app.put('/api/journals/:journalId', (req, res) => {
-  const { journalId } = req.params;
-  const { journal_title, journal_date } = req.body;
-  const query = 'UPDATE journals SET journal_title = ?, journal_date = ? WHERE journal_id = ?';
-
-  db.query(query, [journal_title, journal_date, journalId], (err, results) => {
-    if (err) {
-      console.error('Error updating journal:', err);
-      return res.status(500).json({ message: 'Error updating journal', error: err });
-    }
-    res.status(200).json({ message: 'Journal updated successfully' });
-  });
-});
-
-// Delete a journal
-app.delete('/api/journals/:journalId', (req, res) => {
-  const { journalId } = req.params;
-  const query = 'DELETE FROM journals WHERE journal_id = ?';
-
-  db.query(query, [journalId], (err, results) => {
-    if (err) {
-      console.error('Error deleting journal:', err);
-      return res.status(500).json({ message: 'Error deleting journal', error: err });
-    }
-    res.status(200).json({ message: 'Journal deleted successfully' });
-  });
-});
-
-// Update an entry
-app.put('/api/entries/:entryId', upload.array('entry_images', 5), async (req, res) => {
+app.post('/api/entries', upload.array('entry_images', 5), async (req, res) => {
   try {
-    const { entryId } = req.params;
-    const { journal_id, entry_description, entry_datetime, entry_location, entry_location_name, existing_images } = req.body;
+    const {
+      journal_id,
+      entry_description,
+      entry_datetime,
+      entry_location,
+      entry_location_name
+    } = req.body;
 
     if (!journal_id || !entry_description || !entry_datetime) {
       if (req.files) {
-        req.files.forEach(file => fs.unlinkSync(file.path));
+        await Promise.all(req.files.map(file => fs.unlink(file.path)));
       }
-      return res.status(400).json({ message: 'Journal ID, description, and datetime are required' });
+      return res.status(400).json({
+        message: 'Journal ID, description, and datetime are required'
+      });
+    }
+
+    // Ensure all values are properly defined
+    const location = entry_location ?? null;
+    const location_name = entry_location_name ?? null;
+
+    // Analyze sentiment safely
+    const sentimentAnalysis = analyzeSentiment(entry_description) || {};
+    const sentiment = sentimentAnalysis.sentiment ?? 'neutral';
+    const positive_percentage = sentimentAnalysis.positive_percentage ?? 0;
+    const negative_percentage = sentimentAnalysis.negative_percentage ?? 0;
+    const neutral_percentage = sentimentAnalysis.neutral_percentage ?? 0;
+
+    // Handle uploaded files safely
+    const entry_images = req.files ? req.files.map(file => `/uploads/${file.filename}`) : [];
+
+    const [result] = await pool.execute(
+      `INSERT INTO entries 
+       (journal_id, entry_description, entry_datetime, sentiment,
+        entry_location, entry_location_name, entry_images,
+        positive_percentage, negative_percentage, neutral_percentage)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+
+      [
+        journal_id,
+        entry_description,
+        entry_datetime,
+        sentiment,
+        location,          // Ensuring it's not undefined
+        location_name,     // Ensuring it's not undefined
+        JSON.stringify(entry_images), // Ensure it's a valid JSON string
+        positive_percentage,
+        negative_percentage,
+        neutral_percentage
+      ]
+    );
+
+    res.status(201).json({
+      message: 'Entry created successfully',
+      entry_id: result.insertId,
+      sentiment,
+      positive_percentage,
+      negative_percentage,
+      neutral_percentage,
+      entry_images
+    });
+  } catch (error) {
+    if (req.files) {
+      await Promise.all(req.files.map(file => fs.unlink(file.path)));
+    }
+    console.error('Error creating entry:', error);
+    res.status(500).json({ message: 'Error creating entry', error: error.message });
+  }
+});
+
+
+// Fetch entries for a specific journal
+app.get('/api/entries/:journalId', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM entries WHERE journal_id = ?',
+      [req.params.journalId]
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching entries:', error);
+    res.status(500).json({ message: 'Error fetching entries', error: error.message });
+  }
+});
+
+// Update a journal
+app.put('/api/journals/:journalId', async (req, res) => {
+  try {
+    const { journalId } = req.params;
+    const { journal_title, journal_date } = req.body;
+
+    await pool.execute(
+      'UPDATE journals SET journal_title = ?, journal_date = ? WHERE journal_id = ?',
+      [journal_title, journal_date, journalId]
+    );
+
+    res.json({ message: 'Journal updated successfully' });
+  } catch (error) {
+    console.error('Error updating journal:', error);
+    res.status(500).json({ message: 'Error updating journal', error: error.message });
+  }
+});
+
+// Delete a journal
+app.delete('/api/journals/:journalId', async (req, res) => {
+  try {
+    const { journalId } = req.params;
+
+    await pool.execute('DELETE FROM journals WHERE journal_id = ?', [journalId]);
+    res.json({ message: 'Journal deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting journal:', error);
+    res.status(500).json({ message: 'Error deleting journal', error: error.message });
+  }
+});
+
+app.put('/api/entries/:entryId', upload.array('entry_images', 5), async (req, res) => {
+  try {
+    const { entryId } = req.params;
+    const {
+      journal_id,
+      entry_description,
+      entry_datetime,
+      entry_location,
+      entry_location_name,
+      existing_images
+    } = req.body;
+
+    // Ensure required fields are not undefined
+    if (!journal_id || !entry_description || !entry_datetime) {
+      if (req.files) {
+        await Promise.all(req.files.map(file => fs.unlink(file.path)));
+      }
+      return res.status(400).json({
+        message: 'Journal ID, description, and datetime are required'
+      });
     }
 
     const { sentiment, positive_percentage, negative_percentage, neutral_percentage } = analyzeSentiment(entry_description);
-    
-    // Combine existing and new images
+
+    // Handle existing images
     let entry_images = [];
-    if (existing_images) {
-      entry_images = JSON.parse(existing_images);
+    try {
+      entry_images = existing_images ? JSON.parse(existing_images) : [];
+    } catch (err) {
+      console.error('Error parsing existing images:', err);
     }
+
     if (req.files) {
       const newImages = req.files.map(file => `/uploads/${file.filename}`);
       entry_images = [...entry_images, ...newImages];
     }
 
-    const query = `UPDATE entries SET 
-                   journal_id = ?, 
-                   entry_description = ?, 
-                   entry_datetime = ?, 
-                   sentiment = ?,
-                   entry_location = ?, 
-                   entry_location_name = ?, 
-                   entry_images = ?,
-                   positive_percentage = ?,
-                   negative_percentage = ?,
-                   neutral_percentage = ?
-                   WHERE entry_id = ?`;
-
-    db.query(query, [
+    // Log values before executing the query
+    console.log('Updating entry with values:', {
       journal_id,
       entry_description,
       entry_datetime,
       sentiment,
-      entry_location,
-      entry_location_name,
-      JSON.stringify(entry_images),
+      entry_location: entry_location || null,
+      entry_location_name: entry_location_name || null,
+      entry_images: JSON.stringify(entry_images),
       positive_percentage,
       negative_percentage,
       neutral_percentage,
       entryId
-    ], (err, result) => {
-      if (err) {
-        if (req.files) {
-          req.files.forEach(file => fs.unlinkSync(file.path));
-        }
-        console.error('Error updating entry:', err);
-        return res.status(500).json({ message: 'Error updating entry', error: err });
-      }
+    });
 
-      res.status(200).json({
-        message: 'Entry updated successfully',
+    await pool.execute(
+      `UPDATE entries SET
+       journal_id = ?, entry_description = ?, entry_datetime = ?,
+       sentiment = ?, entry_location = ?, entry_location_name = ?,
+       entry_images = ?, positive_percentage = ?,
+       negative_percentage = ?, neutral_percentage = ?
+       WHERE entry_id = ?`,
+      [
+        journal_id,
+        entry_description,
+        entry_datetime,
         sentiment,
+        entry_location || null,
+        entry_location_name || null,
+        JSON.stringify(entry_images),
         positive_percentage,
         negative_percentage,
         neutral_percentage,
-        entry_images,
-      });
+        entryId
+      ]
+    );
+
+    res.json({
+      message: 'Entry updated successfully',
+      sentiment,
+      positive_percentage,
+      negative_percentage,
+      neutral_percentage,
+      entry_images
     });
   } catch (error) {
     if (req.files) {
-      req.files.forEach(file => fs.unlinkSync(file.path));
+      await Promise.all(req.files.map(file => fs.unlink(file.path)));
     }
-    console.error('Error processing request:', error);
-    res.status(500).json({ message: 'Internal server error', error: error.message });
+    console.error('Error updating entry:', error);
+    res.status(500).json({ message: 'Error updating entry', error: error.message });
   }
 });
 
 // Delete an entry
-app.delete('/api/entries/:entryId', (req, res) => {
-  const { entryId } = req.params;
+app.delete('/api/entries/:entryId', async (req, res) => {
+  try {
+    const { entryId } = req.params;
 
-  const query = 'DELETE FROM entries WHERE entry_id = ?';
-
-  db.query(query, [entryId], (err, results) => {
-    if (err) {
-      console.error('Error deleting entry:', err);
-      return res.status(500).json({ message: 'Error deleting entry', error: err });
-    }
-    res.status(200).json({ message: 'Entry deleted successfully' });
-  });
+    await pool.execute('DELETE FROM entries WHERE entry_id = ?', [entryId]);
+    res.json({ message: 'Entry deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting entry:', error);
+    res.status(500).json({ message: 'Error deleting entry', error: error.message });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
+
+module.exports = pool;
