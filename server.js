@@ -4,7 +4,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const natural = require('natural');
 const multer = require('multer');
-const fs = require('fs').promises;
+const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
 
@@ -163,65 +163,60 @@ function extractKeywords(text) {
 // Function to Recommend Tourist Spots
 async function recommendSpots() {
   try {
-    // Get journal entries with descriptions
-    const [entries] =  await pool.execute('SELECT entry_description FROM entries');
+    const [entries] = await pool.execute('SELECT entry_description FROM entries');
     
-    let recommendations = [];
+    const recommendationsObj = {};
 
     for (const entry of entries) {
       const { entry_description } = entry;
-
       console.log(`Processing Entry: "${entry_description}"`);
 
-      // Analyze Sentiment
-      const sentimentResult = await analyzeSentiment(entry_description);
+      const sentimentResult = analyzeSentiment(entry_description);
 
-      // Only recommend if sentiment is positive
       if (sentimentResult.sentiment !== 'positive') {
         console.log('Skipping entry due to non-positive sentiment.');
         continue;
       }
 
-      // Extract Keywords from Journal Entry
       const entryKeywords = extractKeywords(entry_description);
 
-      const [locations] =  await pool.execute('SELECT location_place, location_name, location_description FROM locations');
+      const [locations] = await pool.execute('SELECT location_place, location_name, location_description FROM locations');
 
-      // Match Locations based on Keywords
       locations.forEach(location => {
         const locationKeywords = extractKeywords(location.location_description);
         const matchScore = entryKeywords.filter(word => locationKeywords.includes(word)).length;
 
         if (matchScore > 0) {
-          console.log(`Match Found! Location: ${location.location_name}, Score: ${matchScore}`);
-
-          recommendations.push({
-            location_name: location.location_name,
-            location_place: location.location_place,
-            match_score: matchScore,
-            sentiment: sentimentResult.sentiment,
-            positive_percentage: sentimentResult.positive_percentage
-          });
+          const uniqueKey = `${location.location_name}|${location.location_place}`.toLowerCase();
+          
+          if (!recommendationsObj[uniqueKey] || recommendationsObj[uniqueKey].match_score < matchScore) {
+            recommendationsObj[uniqueKey] = {
+              location_name: location.location_name,
+              location_place: location.location_place,
+              match_score: matchScore,
+              sentiment: sentimentResult.sentiment,
+              positive_percentage: sentimentResult.positive_percentage
+            };
+          }
         }
       });
     }
 
-    // Sort by match score (higher score = better match)
-    recommendations.sort((a, b) => b.match_score - a.match_score);
+    const recommendations = Object.values(recommendationsObj)
+      .sort((a, b) => {
+        const scoreComparison = b.match_score - a.match_score;
+        if (scoreComparison !== 0) return scoreComparison;
+        
+        return a.location_name.localeCompare(b.location_name);
+      });
 
     console.log('Final Recommendations:', recommendations);
-
     return recommendations;
   } catch (error) {
     console.error('Error:', error);
     return [];
   }
 }
-
-recommendSpots().then(recommendations => {
-  console.log('Recommended Places:', recommendations);
-});
-
 // API Endpoints
 
 // Fetch recommendations
@@ -235,6 +230,19 @@ app.get('/api/recommendations', async (req, res) => {
       message: 'Error fetching recommendations', 
       error: error.message 
     });
+  }
+});
+
+// Fetch locations
+app.get('/api/locations', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT location_place, location_name, location_description, latitude, longitude FROM locations'
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching locations:', error);
+    res.status(500).json({ message: 'Error fetching locations', error: error.message });
   }
 });
 
@@ -273,6 +281,7 @@ app.get('/api/journals', async (req, res) => {
   }
 });
 
+// Create entry
 app.post('/api/entries', upload.array('entry_images', 5), async (req, res) => {
   try {
     const {
@@ -292,18 +301,15 @@ app.post('/api/entries', upload.array('entry_images', 5), async (req, res) => {
       });
     }
 
-    // Ensure all values are properly defined
     const location = entry_location ?? null;
     const location_name = entry_location_name ?? null;
 
-    // Analyze sentiment safely
     const sentimentAnalysis = analyzeSentiment(entry_description) || {};
     const sentiment = sentimentAnalysis.sentiment ?? 'neutral';
     const positive_percentage = sentimentAnalysis.positive_percentage ?? 0;
     const negative_percentage = sentimentAnalysis.negative_percentage ?? 0;
     const neutral_percentage = sentimentAnalysis.neutral_percentage ?? 0;
 
-    // Handle uploaded files safely
     const entry_images = req.files ? req.files.map(file => `/uploads/${file.filename}`) : [];
 
     const [result] = await pool.execute(
@@ -318,9 +324,9 @@ app.post('/api/entries', upload.array('entry_images', 5), async (req, res) => {
         entry_description,
         entry_datetime,
         sentiment,
-        location,          // Ensuring it's not undefined
-        location_name,     // Ensuring it's not undefined
-        JSON.stringify(entry_images), // Ensure it's a valid JSON string
+        location,          
+        location_name,    
+        JSON.stringify(entry_images), 
         positive_percentage,
         negative_percentage,
         neutral_percentage
@@ -345,8 +351,7 @@ app.post('/api/entries', upload.array('entry_images', 5), async (req, res) => {
   }
 });
 
-
-// Fetch entries for a specific journal
+// Fetch entries
 app.get('/api/entries/:journalId', async (req, res) => {
   try {
     const [rows] = await pool.execute(
@@ -380,17 +385,26 @@ app.put('/api/journals/:journalId', async (req, res) => {
 
 // Delete a journal
 app.delete('/api/journals/:journalId', async (req, res) => {
-  try {
-    const { journalId } = req.params;
+  const { journalId } = req.params;
+  const connection = await pool.getConnection();
 
-    await pool.execute('DELETE FROM journals WHERE journal_id = ?', [journalId]);
-    res.json({ message: 'Journal deleted successfully' });
+  try {
+    await connection.beginTransaction();
+    await connection.execute('DELETE FROM entries WHERE journal_id = ?', [journalId]);
+    await connection.execute('DELETE FROM journals WHERE journal_id = ?', [journalId]);
+    await connection.commit();
+
+    res.json({ message: 'Journal and its related entries deleted successfully' });
   } catch (error) {
-    console.error('Error deleting journal:', error);
-    res.status(500).json({ message: 'Error deleting journal', error: error.message });
+    await connection.rollback();
+    console.error('Error deleting journal and its entries:', error);
+    res.status(500).json({ message: 'Error deleting journal and its entries', error: error.message });
+  } finally {
+    connection.release();
   }
 });
 
+// Update an entry
 app.put('/api/entries/:entryId', upload.array('entry_images', 5), async (req, res) => {
   try {
     const { entryId } = req.params;
@@ -403,7 +417,6 @@ app.put('/api/entries/:entryId', upload.array('entry_images', 5), async (req, re
       existing_images
     } = req.body;
 
-    // Ensure required fields are not undefined
     if (!journal_id || !entry_description || !entry_datetime) {
       if (req.files) {
         await Promise.all(req.files.map(file => fs.unlink(file.path)));
@@ -415,12 +428,26 @@ app.put('/api/entries/:entryId', upload.array('entry_images', 5), async (req, re
 
     const { sentiment, positive_percentage, negative_percentage, neutral_percentage } = analyzeSentiment(entry_description);
 
-    // Handle existing images
     let entry_images = [];
-    try {
-      entry_images = existing_images ? JSON.parse(existing_images) : [];
-    } catch (err) {
-      console.error('Error parsing existing images:', err);
+    if (existing_images) {
+      try {
+        entry_images = JSON.parse(existing_images);
+      } catch (err) {
+        console.error('Error parsing existing images:', err);
+      }
+    } else {
+      const [existingEntry] = await pool.execute(
+        'SELECT entry_images FROM entries WHERE entry_id = ?',
+        [entryId]
+      );
+
+      if (existingEntry.length > 0 && existingEntry[0].entry_images) {
+        try {
+          entry_images = JSON.parse(existingEntry[0].entry_images);
+        } catch (err) {
+          console.error('Error parsing existing entry images:', err);
+        }
+      }
     }
 
     if (req.files) {
