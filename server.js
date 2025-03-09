@@ -34,17 +34,14 @@ app.use(bodyParser.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// User registration endpoint
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    // Validate input
     if (!name || !email || !password) {
       return res.status(400).json({ message: 'Name, email, and password are required' });
     }
 
-    // Check if user already exists
     const [existingUsers] = await pool.execute(
       'SELECT * FROM users WHERE email = ?',
       [email]
@@ -54,7 +51,6 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(409).json({ message: 'User with this email already exists' });
     }
 
-    // Hash the password
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
@@ -174,20 +170,16 @@ app.get('/api/user/history', authenticateToken, async (req, res) => {
   try {
     const { userId, month, year } = req.query;
     
-    // Make sure userId exists
     if (!userId) {
       return res.status(400).json({ message: 'Missing user ID parameter' });
     }
     
-    // Convert userId to number for comparison
     const requestedUserId = parseInt(userId);
     
-    // Check if userId conversion is valid
     if (isNaN(requestedUserId)) {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
     
-    // Validate that the requesting user is accessing their own data
     if (requestedUserId !== req.user.user_id) {
       return res.status(403).json({ 
         message: 'Unauthorized access to user data',
@@ -196,11 +188,9 @@ app.get('/api/user/history', authenticateToken, async (req, res) => {
       });
     }
     
-    // Format date for SQL query
     const startDate = `${year}-${month.padStart(2, '0')}-01`;
     const endDate = `${year}-${month.padStart(2, '0')}-31`;
     
-    // Fetch journal entries with sentiment data
     const [entries] = await pool.execute(
       `SELECT e.entry_id, e.journal_id, e.entry_description, e.entry_datetime, 
               e.entry_location, e.entry_location_name, e.entry_images,
@@ -212,13 +202,10 @@ app.get('/api/user/history', authenticateToken, async (req, res) => {
       [requestedUserId, startDate, endDate]
     );
     
-    // If no sentiment data exists in entries, analyze them now
     const processedEntries = await Promise.all(entries.map(async (entry) => {
-      // If sentiment data is missing, analyze it now
       if (entry.sentiment === null || entry.positive_percentage === null) {
         const sentimentResult = analyzeSentiment(entry.entry_description);
         
-        // Update the entry with sentiment data
         await pool.execute(
           `UPDATE entries SET 
             sentiment = ?, 
@@ -235,7 +222,6 @@ app.get('/api/user/history', authenticateToken, async (req, res) => {
           ]
         );
         
-        // Return entry with new sentiment data
         return {
           ...entry,
           sentiment: sentimentResult.sentiment,
@@ -245,11 +231,9 @@ app.get('/api/user/history', authenticateToken, async (req, res) => {
         };
       }
       
-      // Return entry with existing sentiment data
       return entry;
     }));
     
-    // Get aggregate mood data
     let totalPositive = 0;
     let totalNegative = 0;
     let totalNeutral = 0;
@@ -260,9 +244,8 @@ app.get('/api/user/history', authenticateToken, async (req, res) => {
       totalNeutral += entry.neutral_percentage || 0;
     });
     
-    const entryCount = processedEntries.length || 1; // Avoid division by zero
+    const entryCount = processedEntries.length || 1;
     
-    // Return the complete history data
     res.json({
       entries: processedEntries,
       summary: {
@@ -281,7 +264,6 @@ app.get('/api/user/history', authenticateToken, async (req, res) => {
   }
 });
 
-
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadDir = path.join(__dirname, 'uploads');
@@ -298,7 +280,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif/;
     const isValidType = allowedTypes.test(file.mimetype);
@@ -403,7 +385,6 @@ function analyzeSentiment(text) {
   };
 }
 
-// Function to Extract Keywords
 function extractKeywords(text) {
   const tokenizer = new natural.WordTokenizer();
   const stopwords = new Set(natural.stopwords);
@@ -415,11 +396,9 @@ function extractKeywords(text) {
   return keywords;
 }
 
-// Function to Recommend Tourist Spots for a specific user
 async function recommendSpots(userId) {
   console.log("Recommending spots for user ID:", userId);
   try {
-    // Fetch entries for the specific user without entry_images and display_images_in_recommendation
     const [entries] = await pool.execute(
       `SELECT e.entry_description, e.location_id, e.entry_location_name
        FROM entries e 
@@ -430,7 +409,6 @@ async function recommendSpots(userId) {
     
     const recommendationsObj = {};
 
-    // Process entries for recommendations
     for (const entry of entries) {
       const { entry_description } = entry;
       console.log(`Processing Entry: "${entry_description}"`);
@@ -455,7 +433,6 @@ async function recommendSpots(userId) {
         if (matchScore > 0) {
           const uniqueKey = `${location.location_name}|${location.location_place}`.toLowerCase();
           
-          // Process location_images and user_submitted_images to ensure proper formatting
           let processedImages = null;
           let processedUserImages = null;
           
@@ -463,8 +440,8 @@ async function recommendSpots(userId) {
             try {
               const parsedImages = JSON.parse(location.location_images);
               processedImages = Array.isArray(parsedImages) && parsedImages.length > 0 
-                ? parsedImages[0]  // Use the first image
-                : parsedImages;    // Use whatever was parsed
+                ? parsedImages[0]
+                : parsedImages;
             } catch (e) {
               console.log(`Could not parse location_images for ${location.location_name}`, e);
               processedImages = location.location_images;
@@ -475,8 +452,8 @@ async function recommendSpots(userId) {
             try {
               const parsedUserImages = JSON.parse(location.user_submitted_images);
               processedUserImages = Array.isArray(parsedUserImages) && parsedUserImages.length > 0 
-                ? parsedUserImages  // Keep all user-submitted images
-                : parsedUserImages; // Use whatever was parsed
+                ? parsedUserImages 
+                : parsedUserImages; 
             } catch (e) {
               console.log(`Could not parse user_submitted_images for ${location.location_name}`, e);
               processedUserImages = location.user_submitted_images;
@@ -521,6 +498,8 @@ async function recommendSpots(userId) {
 
 async function associateEntryImagesWithLocation(entryId) {
   try {
+    console.log(`Processing entry ${entryId} for image association`);
+    
     const [entryRows] = await pool.execute(
       `SELECT entry_images, location_id, display_images_in_recommendation 
        FROM entries 
@@ -535,23 +514,25 @@ async function associateEntryImagesWithLocation(entryId) {
     
     const entry = entryRows[0];
     
-    if (!entry.location_id || entry.display_images_in_recommendation === false) {
+    console.log(`Entry data:`, {
+      entryId,
+      locationId: entry.location_id,
+      displayImagesInRecommendation: entry.display_images_in_recommendation,
+      displayImagesType: typeof entry.display_images_in_recommendation
+    });
+    
+    if (!entry.location_id) {
+      console.log(`No location associated with entry ${entryId}`);
       return true;
     }
     
-    let entryImages = [];
-    if (entry.entry_images && entry.entry_images !== 'null') {
-      try {
-        entryImages = JSON.parse(entry.entry_images);
-      } catch (e) {
-        console.error(`Error parsing entry images for entry ${entryId}:`, e);
-        return false;
-      }
-    }
+    const isPrivate = !entry.display_images_in_recommendation || 
+                      entry.display_images_in_recommendation === 0 || 
+                      entry.display_images_in_recommendation === '0' || 
+                      entry.display_images_in_recommendation === 'false' || 
+                      entry.display_images_in_recommendation === false;
     
-    if (entryImages.length === 0) {
-      return true;
-    }
+    console.log(`Privacy setting for entry ${entryId}: ${isPrivate ? 'Private' : 'Public'}`);
     
     const [locationRows] = await pool.execute(
       'SELECT user_submitted_images FROM locations WHERE location_id = ?',
@@ -564,31 +545,69 @@ async function associateEntryImagesWithLocation(entryId) {
     }
     
     let userSubmittedImages = [];
-    
-    if (locationRows[0].user_submitted_images) {
+    if (locationRows[0].user_submitted_images && locationRows[0].user_submitted_images !== 'null') {
       try {
         userSubmittedImages = JSON.parse(locationRows[0].user_submitted_images);
+        console.log(`Found ${userSubmittedImages.length} existing images for location ${entry.location_id}`);
       } catch (e) {
         console.error(`Error parsing existing user_submitted_images for location ${entry.location_id}:`, e);
+        userSubmittedImages = [];
       }
     }
     
-    const newImages = entryImages.map(image => ({
-      image_url: image,
-      entry_id: entryId
-    }));
+    const previousCount = userSubmittedImages.length;
+    userSubmittedImages = userSubmittedImages.filter(img => 
+      img.entry_id !== entryId && 
+      img.entry_id !== parseInt(entryId)
+    );
     
-    const existingImageUrls = new Set(userSubmittedImages.map(img => img.image_url));
-    const uniqueNewImages = newImages.filter(img => !existingImageUrls.has(img.image_url));
+    console.log(`Removed ${previousCount - userSubmittedImages.length} existing images from entry ${entryId}`);
     
-    userSubmittedImages = [...userSubmittedImages, ...uniqueNewImages];
+    if (isPrivate) {
+      console.log(`Privacy setting is private for entry ${entryId}. Not adding images to location ${entry.location_id}`);
+      
+      await pool.execute(
+        'UPDATE locations SET user_submitted_images = ? WHERE location_id = ?',
+        [JSON.stringify(userSubmittedImages), entry.location_id]
+      );
+      
+      console.log(`Successfully removed images for private entry ${entryId}`);
+      return true;
+    }
+    
+    let entryImages = [];
+    if (entry.entry_images && entry.entry_images !== 'null') {
+      try {
+        if (typeof entry.entry_images === 'string') {
+          entryImages = JSON.parse(entry.entry_images);
+        } else {
+          entryImages = entry.entry_images;
+        }
+        
+        console.log(`Found ${entryImages.length} images to add from entry ${entryId}`);
+      } catch (e) {
+        console.error(`Error parsing entry images for entry ${entryId}:`, e);
+        return false;
+      }
+    }
+    
+    if (entryImages.length > 0) {
+      const newImages = entryImages.map(image => ({
+        image_url: image,
+        entry_id: entryId
+      }));
+      
+      userSubmittedImages = [...userSubmittedImages, ...newImages];
+      
+      console.log(`Added ${newImages.length} images from entry ${entryId} to location ${entry.location_id}`);
+    }
     
     await pool.execute(
       'UPDATE locations SET user_submitted_images = ? WHERE location_id = ?',
       [JSON.stringify(userSubmittedImages), entry.location_id]
     );
     
-    console.log(`Successfully associated ${uniqueNewImages.length} images with location ${entry.location_id}`);
+    console.log(`Successfully processed images for entry ${entryId} with location ${entry.location_id}`);
     return true;
     
   } catch (error) {
@@ -596,9 +615,9 @@ async function associateEntryImagesWithLocation(entryId) {
     return false;
   }
 }
+
 // API Endpoints
 
-// Fetch recommendations for authenticated user
 app.get('/api/recommendations', authenticateToken, async (req, res) => {
     console.log("User ID from token:", req.user?.user_id);
 
@@ -615,24 +634,20 @@ app.get('/api/recommendations', authenticateToken, async (req, res) => {
   }
 });
 
-// Fetch locations - no user isolation needed as locations are shared data
 app.get('/api/locations', async (req, res) => {
   try {
     const [rows] = await pool.execute(
       'SELECT location_id, location_place, location_name, location_description, location_images, latitude, longitude FROM locations'
     );
     
-    // Process location_images to ensure consistent format
     const processedRows = rows.map(row => {
       if (row.location_images) {
         try {
-          // If it's already a JSON string, parse and return the first image path
           const parsedImages = JSON.parse(row.location_images);
           row.location_images = Array.isArray(parsedImages) && parsedImages.length > 0 
             ? parsedImages[0] 
             : null;
         } catch(e) {
-          // If it can't be parsed as JSON, keep as is
           console.log(`Could not parse location_images for ${row.location_name}`, e);
         }
       }
@@ -646,7 +661,7 @@ app.get('/api/locations', async (req, res) => {
   }
 });
 
-// Create a new journal with user_id
+// Create a new journal
 app.post('/api/journals', authenticateToken, async (req, res) => {
   try {
     const { journal_title, journal_date } = req.body;
@@ -671,7 +686,7 @@ app.post('/api/journals', authenticateToken, async (req, res) => {
   }
 });
 
-// Fetch all journals for authenticated user
+// Fetch all journals
 app.get('/api/journals', authenticateToken, async (req, res) => {
   
   try {
@@ -711,7 +726,6 @@ app.post('/api/entries', authenticateToken, upload.array('entry_images', 5), asy
       });
     }
 
-    // Verify journal belongs to the authenticated user
     const [journals] = await pool.execute(
       'SELECT journal_id FROM journals WHERE journal_id = ? AND user_id = ?',
       [journal_id, userId]
@@ -727,10 +741,8 @@ app.post('/api/entries', authenticateToken, upload.array('entry_images', 5), asy
     const location = entry_location ?? null;
     const location_name = entry_location_name ?? null;
     
-    // Convert display_images_in_recommendation to a boolean
-    // If it's passed as a string "false", convert to boolean false
     const shouldDisplayImages = display_images_in_recommendation === undefined ? 
-      true : // Default to true if not provided
+      true :
       (display_images_in_recommendation === 'false' ? false : Boolean(display_images_in_recommendation));
     
     const sentimentAnalysis = analyzeSentiment(entry_description) || {};
@@ -764,7 +776,6 @@ app.post('/api/entries', authenticateToken, upload.array('entry_images', 5), asy
       ]
     );
 
-    // If location_id is provided and user allows displaying images, associate them
     if (location_id && shouldDisplayImages && entry_images.length > 0) {
       await associateEntryImagesWithLocation(result.insertId);
     }
@@ -789,13 +800,12 @@ app.post('/api/entries', authenticateToken, upload.array('entry_images', 5), asy
   }
 });
 
-// Fetch entries for a specific journal, ensuring user ownership
+// Fetch entries for a specific journal
 app.get('/api/entries/:journalId', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.user_id;
     const journalId = req.params.journalId;
     
-    // Verify the journal belongs to the authenticated user
     const [journals] = await pool.execute(
       'SELECT journal_id FROM journals WHERE journal_id = ? AND user_id = ?',
       [journalId, userId]
@@ -805,7 +815,6 @@ app.get('/api/entries/:journalId', authenticateToken, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to view this journal' });
     }
     
-    // Fetch entries with all required fields
     const [rows] = await pool.execute(
       `SELECT entry_id, entry_description, entry_datetime, entry_images, 
        entry_location_name, sentiment, 
@@ -814,7 +823,7 @@ app.get('/api/entries/:journalId', authenticateToken, async (req, res) => {
       [journalId]
     );
     
-    res.json({ data: rows }); // Structure the response as expected by the frontend
+    res.json({ data: rows });
   } catch (error) {
     console.error('🚨 Error fetching entries:', error);
     res.status(500).json({ message: 'Error fetching entries', error: error.message });
@@ -828,7 +837,6 @@ app.put('/api/journals/:journalId', authenticateToken, async (req, res) => {
     const { journal_title, journal_date } = req.body;
     const userId = req.user.user_id;
 
-    // Verify journal belongs to the authenticated user
     const [journals] = await pool.execute(
       'SELECT journal_id FROM journals WHERE journal_id = ? AND user_id = ?',
       [journalId, userId]
@@ -857,7 +865,6 @@ app.delete('/api/journals/:journalId', authenticateToken, async (req, res) => {
   const connection = await pool.getConnection();
 
   try {
-    // Verify journal belongs to the authenticated user
     const [journals] = await connection.execute(
       'SELECT journal_id FROM journals WHERE journal_id = ?',
       [journalId]
@@ -899,7 +906,6 @@ app.put('/api/entries/:entryId', authenticateToken, upload.array('entry_images',
       display_images_in_recommendation
     } = req.body;
 
-    // Verify entry belongs to the authenticated user
     const [entries] = await pool.execute(
       'SELECT e.entry_id, e.display_images_in_recommendation, e.location_id FROM entries e JOIN journals j ON e.journal_id = j.journal_id WHERE e.entry_id = ? AND j.user_id = ?',
       [entryId, userId]
@@ -921,7 +927,6 @@ app.put('/api/entries/:entryId', authenticateToken, upload.array('entry_images',
       });
     }
 
-    // Verify the journal belongs to this user as well
     const [journals] = await pool.execute(
       'SELECT journal_id FROM journals WHERE journal_id = ? AND user_id = ?',
       [journal_id, userId]
@@ -963,17 +968,13 @@ app.put('/api/entries/:entryId', authenticateToken, upload.array('entry_images',
       entry_images = [...entry_images, ...newImages];
     }
 
-    // Get the previous display_images_in_recommendation setting
     const previousDisplaySetting = entries[0].display_images_in_recommendation;
     const previousLocationId = entries[0].location_id;
     
-    // Convert display_images_in_recommendation to a boolean
-    // If not provided in the request, keep the existing value
     const shouldDisplayImages = display_images_in_recommendation === undefined ? 
       previousDisplaySetting : // Keep existing value if not provided
       (display_images_in_recommendation === 'false' ? false : Boolean(display_images_in_recommendation));
 
-    // Log values before executing the query
     console.log('Updating entry with values:', {
       journal_id,
       entry_description,
@@ -1015,19 +1016,13 @@ app.put('/api/entries/:entryId', authenticateToken, upload.array('entry_images',
       ]
     );
 
-    // Handle changes in location or display preference
     const locationChanged = location_id !== previousLocationId;
     const displaySettingChanged = shouldDisplayImages !== previousDisplaySetting;
     
-    // If either location or display setting changed, we need to handle the images
     if ((locationChanged || displaySettingChanged) && entry_images.length > 0) {
       if (location_id && shouldDisplayImages) {
-        // If new location with display enabled, associate images
         await associateEntryImagesWithLocation(entryId);
       }
-      // Note: If images were previously associated but now shouldn't be,
-      // we would need a function to remove them from the location's user_submitted_images
-      // This is not implemented here but would be a good feature to add
     }
 
     res.json({
@@ -1055,7 +1050,6 @@ app.delete('/api/entries/:entryId', authenticateToken, async (req, res) => {
     const { entryId } = req.params;
     const userId = req.user.user_id;
 
-    // Verify entry belongs to the authenticated user
     const [entries] = await pool.execute(
       'SELECT entry_id FROM entries WHERE entry_id = ?',
       [entryId]
@@ -1076,7 +1070,6 @@ app.delete('/api/entries/:entryId', authenticateToken, async (req, res) => {
 async function aggregateLocationSentiments() {
   try {
     console.log('Fetching entries with location data for all users...');
-    // Fetch all entries with either location_id or entry_location_name for all users
     const [entries] = await pool.execute(`
       SELECT 
         e.entry_id, 
@@ -1090,7 +1083,6 @@ async function aggregateLocationSentiments() {
     `);
     console.log(`Fetched ${entries.length} entries with location data.`);
 
-    // Fetch all locations
     const [locations] = await pool.execute(`
       SELECT 
         location_id, 
@@ -1100,28 +1092,23 @@ async function aggregateLocationSentiments() {
     `);
     console.log(`Fetched ${locations.length} locations.`);
 
-    // Create a map for faster location lookups
     const locationMap = {};
     locations.forEach(location => {
       locationMap[location.location_id] = location;
     });
 
-    // Map for aggregated data
     const locationSentiments = {};
 
-    // Process all entries
     for (const entry of entries) {
-      // Define a unique key combining location data
       let locationKey;
       if (entry.location_id) {
         locationKey = entry.location_id;
       } else if (entry.entry_location_name) {
         locationKey = `name_${entry.entry_location_name.toLowerCase()}`;
       } else {
-        continue; // Skip entries without location info
+        continue;
       }
 
-      // Initialize location data if not already present
       if (!locationSentiments[locationKey]) {
         let locationName, locationPlace;
         
@@ -1131,7 +1118,7 @@ async function aggregateLocationSentiments() {
           locationPlace = location.location_place;
         } else if (entry.entry_location_name) {
           locationName = entry.entry_location_name;
-          locationPlace = ''; // Default empty if no place is available
+          locationPlace = '';
         }
         
         locationSentiments[locationKey] = {
@@ -1148,7 +1135,6 @@ async function aggregateLocationSentiments() {
         };
       }
       
-      // Add sentiment data
       locationSentiments[locationKey].entries_count += 1;
       locationSentiments[locationKey].positive_percentages.push(entry.positive_percentage);
       locationSentiments[locationKey].negative_percentages.push(entry.negative_percentage);
@@ -1157,7 +1143,6 @@ async function aggregateLocationSentiments() {
 
     console.log(`Aggregated data for ${Object.keys(locationSentiments).length} locations`);
 
-    // Calculate averages and prepare final result
     const result = Object.values(locationSentiments).map(location => {
       if (location.entries_count > 0) {
         location.overall_positive = parseFloat((
@@ -1176,7 +1161,6 @@ async function aggregateLocationSentiments() {
         ).toFixed(2));
       }
 
-      // Remove the arrays that were used for calculation
       delete location.positive_percentages;
       delete location.negative_percentages;
       delete location.neutral_percentages;
@@ -1191,11 +1175,9 @@ async function aggregateLocationSentiments() {
   }
 }
 
-// Update to handle shared location sentiments and update locations table
 async function updateLocationSentiments() {
   try {
     console.log('Starting updateLocationSentiments for all users...');
-    // Aggregate all the sentiment data by location across all users
     const locationSentiments = await aggregateLocationSentiments();
     const connection = await pool.getConnection();
     
@@ -1203,12 +1185,10 @@ async function updateLocationSentiments() {
       console.log('Starting database transaction...');
       await connection.beginTransaction();
       
-      // Check if locations table has the required sentiment columns
       const [locationColumns] = await connection.execute(`
         SHOW COLUMNS FROM locations
       `);
       
-      // Check if we need to add sentiment columns to locations table
       const columnNames = locationColumns.map(col => col.Field);
       const sentimentColumns = [
         'entries_count',
@@ -1217,7 +1197,6 @@ async function updateLocationSentiments() {
         'overall_neutral'
       ];
       
-      // Add any missing sentiment columns to locations table
       const missingColumns = sentimentColumns.filter(col => !columnNames.includes(col));
       if (missingColumns.length > 0) {
         console.log(`Adding missing sentiment columns to locations table: ${missingColumns.join(', ')}`);
@@ -1231,13 +1210,10 @@ async function updateLocationSentiments() {
         console.log('Added missing columns to locations table');
       }
       
-      // We'll create a location_sentiments table to store shared sentiment data
-      // First check if the table exists
       const [tables] = await connection.execute(`
         SHOW TABLES LIKE 'location_sentiments'
       `);
       
-      // Create the table if it doesn't exist
       if (tables.length === 0) {
         console.log('Creating location_sentiments table...');
         await connection.execute(`
@@ -1254,13 +1230,11 @@ async function updateLocationSentiments() {
         `);
       }
       
-      // Clear all existing sentiment data
       console.log('Clearing existing sentiment data...');
       await connection.execute(`
         DELETE FROM location_sentiments
       `);
       
-      // Reset sentiment data in locations table
       console.log('Resetting sentiment data in locations table...');
       await connection.execute(`
         UPDATE locations
@@ -1271,14 +1245,11 @@ async function updateLocationSentiments() {
           overall_neutral = 0
       `);
       
-      // Insert new sentiment data for each location
       console.log(`Inserting sentiment data for ${locationSentiments.length} locations...`);
       
       for (const location of locationSentiments) {
-        // Skip locations without a proper location_id (custom locations entered by user)
         if (!location.location_id) continue;
         
-        // Insert into location_sentiments table
         await connection.execute(`
           INSERT INTO location_sentiments 
           (location_id, entries_count, overall_positive, overall_negative, overall_neutral)
@@ -1291,7 +1262,6 @@ async function updateLocationSentiments() {
           location.overall_neutral
         ]);
         
-        // Update the main locations table with sentiment data
         await connection.execute(`
           UPDATE locations
           SET 
@@ -1332,7 +1302,6 @@ async function updateLocationSentiments() {
   }
 }
 
-// Update the API endpoint to get shared location sentiments
 app.get('/api/locations/sentiment', authenticateToken, async (req, res) => {
   try {
     console.log('API request received: GET /api/locations/sentiment');
@@ -1350,7 +1319,6 @@ app.get('/api/locations/sentiment', authenticateToken, async (req, res) => {
   }
 });
 
-// Update API endpoint to manually trigger sentiment update
 app.post('/api/locations/update-sentiments', authenticateToken, async (req, res) => {
   try {
     console.log('API request received: POST /api/locations/update-sentiments');
@@ -1371,7 +1339,6 @@ app.post('/api/locations/update-sentiments', authenticateToken, async (req, res)
   }
 });
 
-// Update to calculate sentiments for all users at once
 async function scheduleLocationSentimentUpdates() {
   console.log('Running scheduled location sentiment updates...');
   
@@ -1386,7 +1353,6 @@ async function scheduleLocationSentimentUpdates() {
   }
 }
 
-// Function to run an immediate test of the sentiment update
 async function testLocationSentimentUpdate() {
   try {
     console.log('==== RUNNING IMMEDIATE TEST OF LOCATION SENTIMENT UPDATE ====');
@@ -1398,7 +1364,6 @@ async function testLocationSentimentUpdate() {
       console.log(JSON.stringify(result.locationData.slice(0, 3), null, 2));
     }
     
-    // Verify that locations table was updated
     const [updatedLocations] = await pool.execute(`
       SELECT location_id, location_name, entries_count, 
              overall_positive, overall_negative, overall_neutral
@@ -1437,7 +1402,6 @@ function initializeScheduler() {
   }, millisecondsInDay);
 }
 
-// Start everything
 initializeScheduler();
 
 app.listen(PORT, () => {

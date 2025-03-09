@@ -23,7 +23,6 @@
     "mysql2": "^3.11.0",
     "natural": "^8.0.1",
     "passport": "^0.7.0",
-    "passport-google-oauth20": "^2.0.0",
     "uuid": "^11.1.0"
   }
 }
