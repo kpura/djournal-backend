@@ -65,7 +65,7 @@ const upload = multer({
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, securityAnswer } = req.body;
 
     if (!name || !email || !password) {
       return res.status(400).json({ message: 'Name, email, and password are required' });
@@ -83,10 +83,10 @@ app.post('/api/auth/register', async (req, res) => {
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Insert new user
+    // Insert new user with security answer
     const [result] = await pool.execute(
-      'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
-      [name, email, hashedPassword]
+      'INSERT INTO users (name, email, password, security_answer) VALUES (?, ?, ?, ?)',
+      [name, email, hashedPassword, securityAnswer]
     );
 
     // Generate JWT token
@@ -114,12 +114,10 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Validate input
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password are required' });
     }
 
-    // Find user by email
     const [users] = await pool.execute(
       'SELECT * FROM users WHERE email = ?',
       [email]
@@ -131,14 +129,12 @@ app.post('/api/auth/login', async (req, res) => {
 
     const user = users[0];
 
-    // Compare passwords
     const passwordMatch = await bcrypt.compare(password, user.password);
 
     if (!passwordMatch) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    // Generate JWT token
     const token = jwt.sign(
       { user_id: user.user_id, email: user.email },
       JWT_SECRET,
@@ -158,7 +154,6 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -183,16 +178,13 @@ app.post('/api/user/upload-profile-picture', authenticateToken, upload.single('p
       return res.status(400).json({ message: 'No file uploaded' });
     }
     
-    // Get the relative path for storing in the database
     const relativePath = `/uploads/${req.file.filename}`;
     
-    // Update the user's profile_picture in the database
     await pool.execute(
       'UPDATE users SET profile_picture = ? WHERE user_id = ?',
       [relativePath, req.user.user_id]
     );
     
-    // Fetch the updated user profile
     const [users] = await pool.execute(
       'SELECT user_id, name, email, profile_picture FROM users WHERE user_id = ?',
       [req.user.user_id]
@@ -209,7 +201,6 @@ app.post('/api/user/upload-profile-picture', authenticateToken, upload.single('p
   }
 });
 
-// Also update your profile API endpoint to include the profile_picture field
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const [users] = await pool.execute(
@@ -225,6 +216,88 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error fetching user profile:', error);
     res.status(500).json({ message: 'Error fetching user profile', error: error.message });
+  }
+});
+
+app.post('/api/auth/check-security-answer', async (req, res) => {
+  try {
+    const { email, securityAnswer } = req.body;
+
+    if (!email || !securityAnswer) {
+      return res.status(400).json({ message: 'Email and security answer are required' });
+    }
+
+    const [users] = await pool.execute(
+      'SELECT * FROM users WHERE email = ?',
+      [email]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const user = users[0];
+
+    if (user.security_answer !== securityAnswer) {
+      return res.status(401).json({ message: 'Incorrect security answer' });
+    }
+
+    const resetToken = jwt.sign(
+      { user_id: user.user_id, email: user.email, purpose: 'password_reset' },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    await pool.execute(
+      'UPDATE users SET reset_token = ? WHERE user_id = ?',
+      [resetToken, user.user_id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Security answer verified',
+      resetToken
+    });
+  } catch (error) {
+    console.error('Error checking security answer:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { email, newPassword } = req.body;
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ message: 'Email and new password are required' });
+    }
+
+    const [users] = await pool.execute(
+      'SELECT * FROM users WHERE email = ?',
+      [email]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const user = users[0];
+
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    await pool.execute(
+      'UPDATE users SET password = ?, reset_token = NULL WHERE user_id = ?',
+      [hashedPassword, user.user_id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Password reset successful'
+    });
+  } catch (error) {
+    console.error('Error resetting password:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -1005,7 +1078,7 @@ app.put('/api/entries/:entryId', authenticateToken, upload.array('entry_images',
     const previousLocationId = entries[0].location_id;
     
     const shouldDisplayImages = display_images_in_recommendation === undefined ? 
-      previousDisplaySetting : // Keep existing value if not provided
+      previousDisplaySetting :
       (display_images_in_recommendation === 'false' ? false : Boolean(display_images_in_recommendation));
 
     console.log('Updating entry with values:', {
@@ -1424,7 +1497,6 @@ function initializeScheduler() {
     .then(() => console.log('Immediate test completed successfully.'))
     .catch(err => console.error('Immediate test failed:', err));
   
-  // Schedule to run daily at midnight
   const millisecondsInDay = 24 * 60 * 60 * 1000;
   setInterval(() => {
     const now = new Date();
